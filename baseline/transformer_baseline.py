@@ -2,7 +2,7 @@ from datasets import Dataset
 import pandas as pd
 import evaluate
 import numpy as np
-from transformers import AutoModelForSequenceClassification, TrainingArguments, Trainer, DataCollatorWithPadding, AutoTokenizer, set_seed
+from transformers import AutoModelForSequenceClassification, TrainingArguments, Trainer, DataCollatorWithPadding, AutoTokenizer, set_seed, AutoConfig
 import os
 from sklearn.model_selection import train_test_split
 from scipy.special import softmax
@@ -50,11 +50,22 @@ def fine_tune(train_df, valid_df, checkpoints_path, id2label, label2id, model):
     train_dataset = Dataset.from_pandas(train_df)
     valid_dataset = Dataset.from_pandas(valid_df)
     
-    # get tokenizer and model from huggingface
-    tokenizer = AutoTokenizer.from_pretrained(model)     # put your model here
-    model = AutoModelForSequenceClassification.from_pretrained(
-       model, num_labels=len(label2id), id2label=id2label, label2id=label2id    # put your model here
-    )
+    # check if checkpoints_path exists
+    if not os.path.exists(checkpoints_path):
+        # get tokenizer and model from huggingface
+        tokenizer = AutoTokenizer.from_pretrained(model)     # put your model here
+        config = AutoConfig.from_pretrained(model)
+        model = AutoModelForSequenceClassification.from_pretrained(
+            model, num_labels=len(label2id), id2label=id2label, label2id=label2id    # put your model here
+        )
+        
+    else:
+        # get tokenizer and model from saved model
+        tokenizer = AutoTokenizer.from_pretrained(checkpoints_path)
+        model = AutoModelForSequenceClassification.from_pretrained(
+            checkpoints_path, num_labels=len(label2id), id2label=id2label, label2id=label2id
+        )
+        config = AutoConfig.from_pretrained(checkpoints_path)
     
     # tokenize data for train/valid
     tokenized_train_dataset = train_dataset.map(preprocess_function, batched=True, fn_kwargs={'tokenizer': tokenizer})
@@ -63,13 +74,12 @@ def fine_tune(train_df, valid_df, checkpoints_path, id2label, label2id, model):
 
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
-
     # create Trainer 
     training_args = TrainingArguments(
         output_dir=checkpoints_path,
         learning_rate=2e-5,
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=8,
+        per_device_train_batch_size=16,
+        per_device_eval_batch_size=16,
         num_train_epochs=1,
         weight_decay=0.01,
         evaluation_strategy="epoch",
@@ -97,6 +107,8 @@ def fine_tune(train_df, valid_df, checkpoints_path, id2label, label2id, model):
     
 
     trainer.save_model(best_model_path)
+    tokenizer.save_pretrained(best_model_path)
+    config.save_pretrained(best_model_path)
 
 
 def test(test_df, model_path, id2label, label2id):
@@ -170,7 +182,7 @@ if __name__ == '__main__':
     fine_tune(train_df, valid_df, f"{model}/subtask{subtask}/{random_seed}", id2label, label2id, model)
 
     # test detector model
-    results, predictions = test(test_df, f"{model}/subtask{subtask}/{random_seed}/best/", id2label, label2id)
+    results, predictions = test(test_df, f"model/subtask{subtask}/{random_seed}/best/", id2label, label2id)
     
     logging.info(results)
     predictions_df = pd.DataFrame({'id': test_df['id'], 'label': predictions})
