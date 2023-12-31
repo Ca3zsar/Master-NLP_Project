@@ -6,3 +6,4 @@ SemEval2024-Task8/SubtaskA/subtaskA_train_multilingual.jsonl
 subtask_a_monolingual.jsonl
 subtask_a_monolingual.zip
 *.jsonl
+*.pyc

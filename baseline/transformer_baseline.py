@@ -9,14 +9,19 @@ from scipy.special import softmax
 import argparse
 import logging
 import torch
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
+
+from torch.optim import AdamW
+from transformers import get_scheduler
+from model_custom import CustomModel
 torch.cuda.empty_cache()
 
 # set max_split_size_mb 
 os.environ['TOKENIZERS_PARALLELISM'] = "false"
 
-
 def preprocess_function(examples, **fn_kwargs):
-    return fn_kwargs['tokenizer'](examples["text"], truncation=True)
+    return fn_kwargs['tokenizer'](examples["text"], max_length=512, truncation=True, padding='max_length')
 
 
 def get_data(train_path, test_path, random_seed):
@@ -27,7 +32,7 @@ def get_data(train_path, test_path, random_seed):
     train_df = pd.read_json(train_path, lines=True)
     test_df = pd.read_json(test_path, lines=True)
     
-    train_df, val_df = train_test_split(train_df, test_size=0.2, stratify=train_df['label'], random_state=random_seed)
+    train_df, val_df = train_test_split(train_df, test_size=0.9, stratify=train_df['label'], random_state=random_seed)
 
     return train_df, val_df, test_df
 
@@ -54,61 +59,83 @@ def fine_tune(train_df, valid_df, checkpoints_path, id2label, label2id, model):
     if not os.path.exists(checkpoints_path):
         # get tokenizer and model from huggingface
         tokenizer = AutoTokenizer.from_pretrained(model)     # put your model here
+        tokenizer.model_max_len=512
         config = AutoConfig.from_pretrained(model)
-        model = AutoModelForSequenceClassification.from_pretrained(
-            model, num_labels=len(label2id), id2label=id2label, label2id=label2id    # put your model here
-        )
+        model = CustomModel(model, num_labels=len(label2id))
         
     else:
         # get tokenizer and model from saved model
         tokenizer = AutoTokenizer.from_pretrained(checkpoints_path)
-        model = AutoModelForSequenceClassification.from_pretrained(
-            checkpoints_path, num_labels=len(label2id), id2label=id2label, label2id=label2id
-        )
+        model = CustomModel(checkpoints_path, num_labels=len(label2id))
         config = AutoConfig.from_pretrained(checkpoints_path)
     
     # tokenize data for train/valid
     tokenized_train_dataset = train_dataset.map(preprocess_function, batched=True, fn_kwargs={'tokenizer': tokenizer})
     tokenized_valid_dataset = valid_dataset.map(preprocess_function, batched=True,  fn_kwargs={'tokenizer': tokenizer})
     
+    tokenized_train_dataset.set_format("torch", columns=["input_ids", "attention_mask", "label"])
+    tokenized_valid_dataset.set_format("torch", columns=["input_ids", "attention_mask", "label"])
 
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
-    # create Trainer 
-    training_args = TrainingArguments(
-        output_dir=checkpoints_path,
-        learning_rate=2e-5,
-        per_device_train_batch_size=16,
-        per_device_eval_batch_size=16,
-        num_train_epochs=1,
-        weight_decay=0.01,
-        evaluation_strategy="epoch",
-        save_strategy="epoch",
-        load_best_model_at_end=True,
+    train_dataloader = DataLoader(
+        tokenized_train_dataset, shuffle=True, batch_size=8, collate_fn=data_collator
+    )
+    eval_dataloader = DataLoader(
+        tokenized_valid_dataset, batch_size=8, collate_fn=data_collator
     )
 
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=tokenized_train_dataset,
-        eval_dataset=tokenized_valid_dataset,
-        tokenizer=tokenizer,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics,
+    optimizer = AdamW(model.parameters(), lr=5e-5)
+    num_epochs = 1
+    num_training_steps = num_epochs * len(train_dataloader)
+
+    lr_scheduler = get_scheduler(
+        "linear",
+        optimizer=optimizer,
+        num_warmup_steps=0,
+        num_training_steps=num_training_steps,
     )
+    f1_metric = evaluate.load("f1")
+    acc_metric = evaluate.load("accuracy")
 
-    trainer.train()
+    progress_bar_train = tqdm(range(num_training_steps))
+    progress_bar_eval = tqdm(range(num_epochs * len(eval_dataloader)))
 
-    # save best model
-    best_model_path = checkpoints_path+'/best/'
+    for epoch in range(num_epochs):
+        model.train()
+        for batch in train_dataloader:
+            batch = {k: v for k, v in batch.items()}
+            outputs = model(**batch)
+            loss = outputs.loss
+            loss.backward()
+
+            optimizer.step()
+            lr_scheduler.step()
+            optimizer.zero_grad()
+            progress_bar_train.update(1)
+
+        model.eval()
+        for batch in eval_dataloader:
+            batch = {k: v for k, v in batch.items()}
+            with torch.no_grad():
+                outputs = model(**batch)
+
+            logits = outputs.logits
+            predictions = torch.argmax(logits, dim=-1)
+            f1_metric.add_batch(predictions=predictions, references=batch["labels"])
+            acc_metric.add_batch(predictions=predictions, references=batch["labels"])
+            progress_bar_eval.update(1)
+        
+        print(f"Epoch {epoch}")
+        print(f1_metric.compute())
+        print(acc_metric.compute())
     
-    if not os.path.exists(best_model_path):
-        os.makedirs(best_model_path)
-    
+    # save model
+    model.save_pretrained(checkpoints_path)
+    tokenizer.save_pretrained(checkpoints_path)
 
-    trainer.save_model(best_model_path)
-    tokenizer.save_pretrained(best_model_path)
-    config.save_pretrained(best_model_path)
+    # save config
+    config.save_pretrained(checkpoints_path)
 
 
 def test(test_df, model_path, id2label, label2id):
