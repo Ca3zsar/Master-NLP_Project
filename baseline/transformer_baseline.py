@@ -32,7 +32,7 @@ def get_data(train_path, test_path, random_seed):
     train_df = pd.read_json(train_path, lines=True)
     test_df = pd.read_json(test_path, lines=True)
     
-    train_df, val_df = train_test_split(train_df, test_size=0.9, stratify=train_df['label'], random_state=random_seed)
+    train_df, val_df = train_test_split(train_df, test_size=0.99, stratify=train_df['label'], random_state=random_seed)
 
     return train_df, val_df, test_df
 
@@ -114,24 +114,25 @@ def fine_tune(train_df, valid_df, checkpoints_path, id2label, label2id, model):
             optimizer.zero_grad()
             progress_bar_train.update(1)
 
-        model.eval()
-        for batch in eval_dataloader:
-            batch = {k: v for k, v in batch.items()}
-            with torch.no_grad():
-                outputs = model(**batch)
+        # model.eval()
+        # for batch in eval_dataloader:
+        #     batch = {k: v for k, v in batch.items()}
+        #     with torch.no_grad():
+        #         outputs = model(**batch)
 
-            logits = outputs.logits
-            predictions = torch.argmax(logits, dim=-1)
-            f1_metric.add_batch(predictions=predictions, references=batch["labels"])
-            acc_metric.add_batch(predictions=predictions, references=batch["labels"])
-            progress_bar_eval.update(1)
+        #     logits = outputs.logits
+        #     predictions = torch.argmax(logits, dim=-1)
+        #     f1_metric.add_batch(predictions=predictions, references=batch["labels"])
+        #     acc_metric.add_batch(predictions=predictions, references=batch["labels"])
+        #     progress_bar_eval.update(1)
         
         print(f"Epoch {epoch}")
-        print(f1_metric.compute())
-        print(acc_metric.compute())
+        # print(f1_metric.compute())
+        # print(acc_metric.compute())
     
-    # save model
-    model.save_pretrained(checkpoints_path)
+    # save model'
+    torch.save(model.state_dict(), os.path.join(checkpoints_path, "pytorch_model.bin"))
+    # model.save(checkpoints_path)
     tokenizer.save_pretrained(checkpoints_path)
 
     # save config
@@ -206,7 +207,7 @@ if __name__ == '__main__':
     train_df, valid_df, test_df = get_data(train_path, test_path, random_seed)
     
     # train detector model
-    fine_tune(train_df, valid_df, f"{model}/subtask{subtask}/{random_seed}", id2label, label2id, model)
+    fine_tune(train_df, valid_df, f"model/subtask{subtask}/{random_seed}", id2label, label2id, model)
 
     # test detector model
     results, predictions = test(test_df, f"model/subtask{subtask}/{random_seed}/best/", id2label, label2id)
