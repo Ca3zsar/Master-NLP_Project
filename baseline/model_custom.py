@@ -1,19 +1,22 @@
 from transformers import AutoModel, AutoConfig
 from transformers.modeling_outputs import TokenClassifierOutput
+from huggingface_hub import PyTorchModelHubMixin
 
 import torch.nn as nn
 # distilbert-base-uncased
 
-class CustomModel(nn.Module):
-    def __init__(self,checkpoint,num_labels): 
-        super(CustomModel,self).__init__() 
+class CustomModel(nn.Module, PyTorchModelHubMixin):
+    def __init__(self,checkpoint,num_labels, **kwargs): 
+        super().__init__()
         self.num_labels = num_labels 
 
         #Load Model with given checkpoint and extract its body
-        self.model = AutoModel.from_pretrained(checkpoint,config=AutoConfig.from_pretrained(checkpoint, output_attentions=True,output_hidden_states=True))
+        self.model = AutoModel.from_pretrained("roberta-base",config=AutoConfig.from_pretrained("roberta-base", output_attentions=True,output_hidden_states=True))
+        for param in self.model.parameters():
+            param.requires_grad = False
 
         self.dropout = nn.Dropout(0.1) 
-        self.classifier = nn.Linear(768,num_labels) # load and initialize weights
+        self.classifier = nn.Linear(768, num_labels) # load and initialize weights
 
     def forward(self, input_ids=None, attention_mask=None,labels=None):
         #Extract outputs from the body

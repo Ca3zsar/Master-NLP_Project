@@ -32,7 +32,7 @@ def get_data(train_path, test_path, random_seed):
     train_df = pd.read_json(train_path, lines=True)
     test_df = pd.read_json(test_path, lines=True)
     
-    train_df, val_df = train_test_split(train_df, test_size=0.99, stratify=train_df['label'], random_state=random_seed)
+    train_df, val_df = train_test_split(train_df, test_size=0.01, stratify=train_df['label'], random_state=random_seed)
 
     return train_df, val_df, test_df
 
@@ -66,7 +66,7 @@ def fine_tune(train_df, valid_df, checkpoints_path, id2label, label2id, model):
     else:
         # get tokenizer and model from saved model
         tokenizer = AutoTokenizer.from_pretrained(checkpoints_path)
-        model = CustomModel(checkpoints_path, num_labels=len(label2id))
+        model = CustomModel.from_pretrained(checkpoints_path, num_labels=len(label2id), checkpoint=checkpoints_path)
         config = AutoConfig.from_pretrained(checkpoints_path)
     
     # tokenize data for train/valid
@@ -85,7 +85,7 @@ def fine_tune(train_df, valid_df, checkpoints_path, id2label, label2id, model):
         tokenized_valid_dataset, batch_size=8, collate_fn=data_collator
     )
 
-    optimizer = AdamW(model.parameters(), lr=5e-5)
+    optimizer = AdamW(model.parameters(), lr=1e-4)
     num_epochs = 1
     num_training_steps = num_epochs * len(train_dataloader)
 
@@ -114,7 +114,7 @@ def fine_tune(train_df, valid_df, checkpoints_path, id2label, label2id, model):
             optimizer.zero_grad()
             progress_bar_train.update(1)
 
-        # model.eval()
+        # model._eval()
         # for batch in eval_dataloader:
         #     batch = {k: v for k, v in batch.items()}
         #     with torch.no_grad():
@@ -124,15 +124,13 @@ def fine_tune(train_df, valid_df, checkpoints_path, id2label, label2id, model):
         #     predictions = torch.argmax(logits, dim=-1)
         #     f1_metric.add_batch(predictions=predictions, references=batch["labels"])
         #     acc_metric.add_batch(predictions=predictions, references=batch["labels"])
-        #     progress_bar_eval.update(1)
         
         print(f"Epoch {epoch}")
         # print(f1_metric.compute())
         # print(acc_metric.compute())
     
     # save model'
-    torch.save(model.state_dict(), os.path.join(checkpoints_path, "pytorch_model.bin"))
-    # model.save(checkpoints_path)
+    model.save_pretrained(checkpoints_path)
     tokenizer.save_pretrained(checkpoints_path)
 
     # save config
@@ -145,29 +143,32 @@ def test(test_df, model_path, id2label, label2id):
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     # load best model
-    model = AutoModelForSequenceClassification.from_pretrained(
-       model_path, num_labels=len(label2id), id2label=id2label, label2id=label2id
-    )
-            
+    model = CustomModel.from_pretrained(model_path, num_labels=len(label2id), checkpoint=model_path) 
     test_dataset = Dataset.from_pandas(test_df)
 
     tokenized_test_dataset = test_dataset.map(preprocess_function, batched=True,  fn_kwargs={'tokenizer': tokenizer})
+
+    tokenized_test_dataset.set_format("torch", columns=["input_ids", "attention_mask"])
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
-    # create Trainer
-    trainer = Trainer(
-        model=model,
-        tokenizer=tokenizer,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics,
+    eval_dataloader = DataLoader(
+        tokenized_test_dataset, batch_size=32, collate_fn=data_collator
     )
-    # get logits from predictions and evaluate results using classification report
-    predictions = trainer.predict(tokenized_test_dataset)
-    prob_pred = softmax(predictions.predictions, axis=-1)
-    preds = np.argmax(predictions.predictions, axis=-1)
-    metric = evaluate.load("bstrai/classification_report")
-    results = metric.compute(predictions=preds, references=predictions.label_ids)
-    
+
+    model.eval()
+    preds = []
+
+    for batch in eval_dataloader:
+        batch = {k: v for k, v in batch.items()}
+        with torch.no_grad():
+            outputs = model(**batch)
+
+        logits = outputs.logits
+        predictions = torch.argmax(logits, dim=-1)
+        preds.extend(predictions.tolist())
+
+    results = None
+
     # return dictionary of classification report
     return results, preds
 
@@ -207,10 +208,10 @@ if __name__ == '__main__':
     train_df, valid_df, test_df = get_data(train_path, test_path, random_seed)
     
     # train detector model
-    fine_tune(train_df, valid_df, f"model/subtask{subtask}/{random_seed}", id2label, label2id, model)
+    fine_tune(train_df, valid_df, f"{model}_local/subtask{subtask}/{random_seed}", id2label, label2id, model)
 
     # test detector model
-    results, predictions = test(test_df, f"model/subtask{subtask}/{random_seed}/best/", id2label, label2id)
+    results, predictions = test(test_df, f"{model}_local/subtask{subtask}/{random_seed}", id2label, label2id)
     
     logging.info(results)
     predictions_df = pd.DataFrame({'id': test_df['id'], 'label': predictions})
